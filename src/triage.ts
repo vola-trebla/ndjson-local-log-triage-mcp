@@ -180,6 +180,16 @@ export async function summarizeLogTimeline(
 
   const sortedKeys = Array.from(buckets.keys()).sort((a, b) => a - b);
 
+  const errorCounts = Array.from(buckets.values()).map((b) => b.errors);
+  const meanErrors =
+    errorCounts.length > 0 ? errorCounts.reduce((a, c) => a + c, 0) / errorCounts.length : 0;
+  const errorVariance =
+    errorCounts.length > 0
+      ? errorCounts.reduce((sum, c) => sum + (c - meanErrors) ** 2, 0) / errorCounts.length
+      : 0;
+  const errorStdDev = Math.sqrt(errorVariance);
+  const spikeThreshold = meanErrors + errorStdDev;
+
   const lines = [
     `Log Timeline Summary`,
     `  File:        ${logFile}`,
@@ -195,7 +205,7 @@ export async function summarizeLogTimeline(
   for (const key of sortedKeys) {
     const b = buckets.get(key)!;
     const time = new Date(key).toISOString().replace("T", " ").replace(".000Z", "Z");
-    const errorMark = b.errors > 0 ? " !" : "  ";
+    const errorMark = b.errors > spikeThreshold ? " !" : "  ";
     lines.push(
       `${errorMark} ${time.padEnd(24)} ${String(b.errors).padStart(6)}  ${String(b.warnings).padStart(8)}  ${String(b.info).padStart(4)}  ${String(b.other).padStart(5)}`,
     );

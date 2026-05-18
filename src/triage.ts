@@ -1,5 +1,5 @@
-import * as fs from "fs";
-import * as readline from "readline";
+import * as fs from 'fs';
+import * as readline from 'readline';
 
 export async function queryLogPattern(
   logFile: string,
@@ -21,7 +21,7 @@ export async function queryLogPattern(
     if (matches.length >= limit) return;
     try {
       const entry = JSON.parse(line) as Record<string, unknown>;
-      const fieldValue = String(entry[field] ?? "").toLowerCase();
+      const fieldValue = String(entry[field] ?? '').toLowerCase();
       if (fieldValue.includes(needle)) {
         matches.push(entry);
       }
@@ -35,21 +35,21 @@ export async function queryLogPattern(
     `  File:        ${logFile}`,
     `  Filter:      ${field} contains "${value}"`,
     `  Lines read:  ${totalLines}`,
-    `  Matches:     ${matches.length}${matches.length >= limit ? ` (limit ${limit} reached)` : ""}`,
-    parseErrors > 0 ? `  Parse errors: ${parseErrors}` : "",
-    "",
-  ].filter((l) => l !== "");
+    `  Matches:     ${matches.length}${matches.length >= limit ? ` (limit ${limit} reached)` : ''}`,
+    parseErrors > 0 ? `  Parse errors: ${parseErrors}` : '',
+    '',
+  ].filter((l) => l !== '');
 
   if (matches.length === 0) {
-    lines.push("  No matching entries found.");
+    lines.push('  No matching entries found.');
   } else {
-    lines.push("");
+    lines.push('');
     for (const entry of matches) {
       lines.push(JSON.stringify(entry));
     }
   }
 
-  return lines.join("\n");
+  return lines.join('\n');
 }
 
 export async function detectErrorAnomalies(
@@ -74,7 +74,7 @@ export async function detectErrorAnomalies(
     totalLines++;
     try {
       const entry = JSON.parse(line) as Record<string, unknown>;
-      const level = String(entry[levelField] ?? "").toLowerCase();
+      const level = String(entry[levelField] ?? '').toLowerCase();
       if (!errorSet.has(level)) return;
       const ts = parseTimestamp(entry[timestampField]);
       if (ts === null) {
@@ -95,7 +95,7 @@ export async function detectErrorAnomalies(
       `  Lines read: ${totalLines}`,
       ``,
       `  No error entries with parseable timestamps found.`,
-    ].join("\n");
+    ].join('\n');
   }
 
   const counts = Array.from(buckets.values());
@@ -117,7 +117,7 @@ export async function detectErrorAnomalies(
     `Error Anomaly Detection`,
     `  File:            ${logFile}`,
     `  Lines read:      ${totalLines}`,
-    skipped > 0 ? `  Skipped:         ${skipped} (no timestamp / parse error)` : "",
+    skipped > 0 ? `  Skipped:         ${skipped} (no timestamp / parse error)` : '',
     `  Window:          ${windowMinutes}min`,
     `  Z-score cutoff:  ${zScoreThreshold}`,
     `  Baseline:        mean=${mean.toFixed(1)} errors/window, stdDev=${stdDev.toFixed(1)}`,
@@ -134,7 +134,7 @@ export async function detectErrorAnomalies(
     }
   }
 
-  return lines.join("\n");
+  return lines.join('\n');
 }
 
 export async function summarizeLogTimeline(
@@ -158,7 +158,7 @@ export async function summarizeLogTimeline(
     totalLines++;
     try {
       const entry = JSON.parse(line) as Record<string, unknown>;
-      const level = String(entry[levelField] ?? "").toLowerCase();
+      const level = String(entry[levelField] ?? '').toLowerCase();
       const ts = parseTimestamp(entry[timestampField]);
       if (ts === null) {
         skipped++;
@@ -169,9 +169,9 @@ export async function summarizeLogTimeline(
         buckets.set(key, { errors: 0, warnings: 0, info: 0, other: 0 });
       }
       const b = buckets.get(key)!;
-      if (level === "error" || level === "fatal" || level === "critical") b.errors++;
-      else if (level === "warn" || level === "warning") b.warnings++;
-      else if (level === "info") b.info++;
+      if (level === 'error' || level === 'fatal' || level === 'critical') b.errors++;
+      else if (level === 'warn' || level === 'warning') b.warnings++;
+      else if (level === 'info') b.info++;
       else b.other++;
     } catch {
       skipped++;
@@ -195,23 +195,23 @@ export async function summarizeLogTimeline(
     `  File:        ${logFile}`,
     `  Lines read:  ${totalLines}`,
     `  Window:      ${windowMinutes}min`,
-    skipped > 0 ? `  Skipped:     ${skipped} (no timestamp / parse error)` : "",
+    skipped > 0 ? `  Skipped:     ${skipped} (no timestamp / parse error)` : '',
     `  Buckets:     ${buckets.size}`,
     ``,
     `  Time (UTC)                 Errors  Warnings  Info  Other`,
     `  ─────────────────────────────────────────────────────────`,
-  ].filter((l) => l !== "");
+  ].filter((l) => l !== '');
 
   for (const key of sortedKeys) {
     const b = buckets.get(key)!;
-    const time = new Date(key).toISOString().replace("T", " ").replace(".000Z", "Z");
-    const errorMark = b.errors > spikeThreshold ? " !" : "  ";
+    const time = new Date(key).toISOString().replace('T', ' ').replace('.000Z', 'Z');
+    const errorMark = b.errors > spikeThreshold ? ' !' : '  ';
     lines.push(
       `${errorMark} ${time.padEnd(24)} ${String(b.errors).padStart(6)}  ${String(b.warnings).padStart(8)}  ${String(b.info).padStart(4)}  ${String(b.other).padStart(5)}`,
     );
   }
 
-  return lines.join("\n");
+  return lines.join('\n');
 }
 
 async function streamLines(filePath: string, onLine: (line: string) => void): Promise<void> {
@@ -220,12 +220,12 @@ async function streamLines(filePath: string, onLine: (line: string) => void): Pr
       input: fs.createReadStream(filePath),
       crlfDelay: Infinity,
     });
-    rl.on("line", (line) => {
+    rl.on('line', (line) => {
       const trimmed = line.trim();
       if (trimmed) onLine(trimmed);
     });
-    rl.on("close", resolve);
-    rl.on("error", reject);
+    rl.on('close', resolve);
+    rl.on('error', reject);
   });
 }
 

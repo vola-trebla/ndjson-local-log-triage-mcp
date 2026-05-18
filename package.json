@@ -55,5 +55,10 @@
     "src/**/*.ts": [
       "eslint --fix"
     ]
+  },
+  "mcpName": "io.github.vola-trebla/ndjson-local-log-triage-mcp",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/vola-trebla/ndjson-local-log-triage-mcp.git"
   }
 }

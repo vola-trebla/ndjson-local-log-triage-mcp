@@ -1,6 +1,6 @@
 {
   "name": "ndjson-local-log-triage-mcp",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "MCP server for streaming NDJSON log triage — query patterns, detect anomalies, summarize timelines without loading gigabyte files into context.",
   "type": "module",
   "main": "dist/index.js",

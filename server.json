@@ -1,17 +1,17 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.vola-trebla/ndjson-local-log-triage-mcp",
-  "description": "MCP server for streaming NDJSON log triage — query patterns, detect anomalies, summarize timelines without loading gigabyte files into context.",
+  "description": "Streams NDJSON log triage: query patterns, detect anomalies, summarize timelines without full load.",
   "repository": {
     "url": "https://github.com/vola-trebla/ndjson-local-log-triage-mcp",
     "source": "github"
   },
-  "version": "0.1.0",
+  "version": "0.1.1",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "ndjson-local-log-triage-mcp",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "transport": {
         "type": "stdio"
       }

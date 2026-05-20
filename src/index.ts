@@ -5,7 +5,7 @@ import { z } from 'zod/v4';
 
 const server = new McpServer({
   name: 'ndjson-local-log-triage-mcp',
-  version: '0.1.0',
+  version: '0.2.0',
 });
 
 server.tool(

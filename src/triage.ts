@@ -1,4 +1,5 @@
 import * as fs from 'fs';
+import * as path from 'path';
 import * as readline from 'readline';
 
 interface StreamStats {
@@ -291,6 +292,87 @@ export async function summarizeLogTimeline(
     lines.push(
       `${errorMark} ${time.padEnd(24)} ${String(b.errors).padStart(6)}  ${String(b.warnings).padStart(8)}  ${String(b.info).padStart(4)}  ${String(b.other).padStart(5)}`,
     );
+  }
+
+  return lines.join('\n');
+}
+
+export interface CorrelateRequestParams {
+  logFiles: string[];
+  traceId: string;
+  idField: string;
+  serviceField: string;
+  timestampField: string;
+  lineStartPattern?: string;
+}
+
+export async function correlateRequest(params: CorrelateRequestParams): Promise<string> {
+  const { logFiles, traceId, idField, serviceField, timestampField, lineStartPattern } = params;
+  const pattern = lineStartPattern ? new RegExp(lineStartPattern) : undefined;
+
+  interface CorrelatedEvent {
+    ts: number;
+    time: string;
+    service: string;
+    raw: Record<string, unknown>;
+  }
+
+  const events: CorrelatedEvent[] = [];
+  const services = new Set<string>();
+  const warnings: string[] = [];
+  let filesScanned = 0;
+
+  for (const logFile of logFiles) {
+    if (!fs.existsSync(logFile)) {
+      warnings.push(`file not found: ${logFile}`);
+      continue;
+    }
+    filesScanned++;
+    const fileName = path.basename(logFile);
+
+    await streamLinesResilient(logFile, pattern, (entry) => {
+      if (String(entry[idField] ?? '') !== traceId) return;
+      const ts = parseTimestamp(entry[timestampField]);
+      const service = String(entry[serviceField] ?? '');
+      if (service) services.add(service);
+      events.push({
+        ts: ts ?? 0,
+        time: ts ? new Date(ts).toISOString() : '(no timestamp)',
+        service,
+        raw: { ...entry, _file: fileName },
+      });
+    });
+  }
+
+  events.sort((a, b) => a.ts - b.ts);
+
+  const durationMs = events.length >= 2 ? events[events.length - 1].ts - events[0].ts : 0;
+
+  const lines = [
+    `Request Correlation`,
+    `  Trace ID:          ${traceId}`,
+    `  Files scanned:     ${filesScanned}`,
+    `  Events found:      ${events.length}`,
+  ];
+  if (services.size > 0) {
+    lines.push(`  Services involved: ${Array.from(services).sort().join(', ')}`);
+  }
+  if (events.length >= 2) {
+    lines.push(`  Duration:          ${durationMs}ms`);
+  }
+  for (const w of warnings) {
+    lines.push(`  Warning:           ${w}`);
+  }
+
+  if (events.length === 0) {
+    lines.push('');
+    lines.push('  No matching events found.');
+  } else {
+    lines.push('');
+    for (const ev of events) {
+      const svc = ev.service ? ev.service.padEnd(12) : '            ';
+      lines.push(`[${ev.time}] ${svc}  ${JSON.stringify(ev.raw)}`);
+    }
   }
 
   return lines.join('\n');

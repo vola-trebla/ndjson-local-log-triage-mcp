@@ -2,11 +2,18 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { queryLogPattern, detectErrorAnomalies, summarizeLogTimeline } from '../src/triage.js';
+import {
+  queryLogPattern,
+  detectErrorAnomalies,
+  summarizeLogTimeline,
+  correlateRequest,
+} from '../src/triage.js';
 
 let logDir: string;
 let logFile: string;
 let multilineFile: string;
+let traceFile1: string;
+let traceFile2: string;
 
 function makeEntry(level: string, timestamp: string, extra: Record<string, unknown> = {}): string {
   return JSON.stringify({ timestamp, level, msg: 'test entry', ...extra });
@@ -60,6 +67,56 @@ beforeAll(() => {
       JSON.stringify({ timestamp: '2025-01-15T03:01:00Z', level: 'info', msg: 'Reconnecting' }),
       JSON.stringify({ timestamp: '2025-01-15T03:02:00Z', level: 'error', msg: 'Failed again' }),
       'Caused by: timeout after 30s',
+    ].join('\n') + '\n',
+  );
+
+  // Two service log files with interleaved events, some sharing trace_id "req-abc"
+  traceFile1 = path.join(logDir, 'svc-auth.ndjson');
+  fs.writeFileSync(
+    traceFile1,
+    [
+      JSON.stringify({
+        timestamp: '2025-01-15T03:15:00.100Z',
+        level: 'info',
+        service: 'auth',
+        trace_id: 'req-abc',
+        msg: 'validate token',
+      }),
+      JSON.stringify({
+        timestamp: '2025-01-15T03:15:00.300Z',
+        level: 'error',
+        service: 'auth',
+        trace_id: 'req-abc',
+        msg: 'token expired',
+      }),
+      JSON.stringify({
+        timestamp: '2025-01-15T03:15:00.050Z',
+        level: 'info',
+        service: 'auth',
+        trace_id: 'req-other',
+        msg: 'unrelated',
+      }),
+    ].join('\n') + '\n',
+  );
+
+  traceFile2 = path.join(logDir, 'svc-api.ndjson');
+  fs.writeFileSync(
+    traceFile2,
+    [
+      JSON.stringify({
+        timestamp: '2025-01-15T03:15:00.000Z',
+        level: 'info',
+        service: 'api',
+        trace_id: 'req-abc',
+        msg: 'incoming request',
+      }),
+      JSON.stringify({
+        timestamp: '2025-01-15T03:15:00.400Z',
+        level: 'info',
+        service: 'api',
+        trace_id: 'req-abc',
+        msg: 'returning 401',
+      }),
     ].join('\n') + '\n',
   );
 });
@@ -219,5 +276,82 @@ describe('resilient multiline parsing', () => {
     const result = await summarizeLogTimeline(multilineFile, 'timestamp', 'level', 5, '^{');
     expect(result).toContain('Reconstructed events:');
     expect(result).toContain('2025-01-15');
+  });
+});
+
+describe('correlateRequest', () => {
+  it('collects all events matching trace_id across two files', async () => {
+    const result = await correlateRequest({
+      logFiles: [traceFile1, traceFile2],
+      traceId: 'req-abc',
+      idField: 'trace_id',
+      serviceField: 'service',
+      timestampField: 'timestamp',
+    });
+    expect(result).toContain('Events found:      4');
+    expect(result).toContain('Files scanned:     2');
+  });
+
+  it('sorts events chronologically across files', async () => {
+    const result = await correlateRequest({
+      logFiles: [traceFile1, traceFile2],
+      traceId: 'req-abc',
+      idField: 'trace_id',
+      serviceField: 'service',
+      timestampField: 'timestamp',
+    });
+    const eventLines = result.split('\n').filter((l) => l.startsWith('['));
+    expect(eventLines.length).toBe(4);
+    // First event is api at 03:15:00.000Z (earliest)
+    expect(eventLines[0]).toContain('incoming request');
+    // Last event is api at 03:15:00.400Z
+    expect(eventLines[3]).toContain('returning 401');
+  });
+
+  it('reports correct services_involved', async () => {
+    const result = await correlateRequest({
+      logFiles: [traceFile1, traceFile2],
+      traceId: 'req-abc',
+      idField: 'trace_id',
+      serviceField: 'service',
+      timestampField: 'timestamp',
+    });
+    expect(result).toContain('Services involved: api, auth');
+  });
+
+  it('reports duration_ms between first and last event', async () => {
+    const result = await correlateRequest({
+      logFiles: [traceFile1, traceFile2],
+      traceId: 'req-abc',
+      idField: 'trace_id',
+      serviceField: 'service',
+      timestampField: 'timestamp',
+    });
+    expect(result).toContain('Duration:          400ms');
+  });
+
+  it('returns no matching events for unknown trace_id', async () => {
+    const result = await correlateRequest({
+      logFiles: [traceFile1, traceFile2],
+      traceId: 'req-unknown',
+      idField: 'trace_id',
+      serviceField: 'service',
+      timestampField: 'timestamp',
+    });
+    expect(result).toContain('Events found:      0');
+    expect(result).toContain('No matching events found.');
+  });
+
+  it('reports warning for non-existent file and scans remaining files', async () => {
+    const result = await correlateRequest({
+      logFiles: ['/tmp/does-not-exist.ndjson', traceFile2],
+      traceId: 'req-abc',
+      idField: 'trace_id',
+      serviceField: 'service',
+      timestampField: 'timestamp',
+    });
+    expect(result).toContain('Warning:');
+    expect(result).toContain('Files scanned:     1');
+    expect(result).toContain('Events found:      2');
   });
 });

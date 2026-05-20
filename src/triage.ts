@@ -230,36 +230,70 @@ export async function summarizeLogTimeline(
   levelField: string,
   windowMinutes: number,
   lineStartPattern?: string,
+  adaptive?: boolean,
 ): Promise<string> {
   if (!fs.existsSync(logFile)) {
     return `Error: file not found: ${logFile}`;
   }
 
   const pattern = lineStartPattern ? new RegExp(lineStartPattern) : undefined;
-  const windowMs = windowMinutes * 60 * 1000;
 
   type Bucket = { errors: number; warnings: number; info: number; other: number };
-  const buckets = new Map<number, Bucket>();
-  let skipped = 0;
 
-  const stats = await streamLinesResilient(logFile, pattern, (entry) => {
-    const level = String(entry[levelField] ?? '').toLowerCase();
-    const ts = parseTimestamp(entry[timestampField]);
-    if (ts === null) {
-      skipped++;
-      return;
-    }
-    const key = Math.floor(ts / windowMs) * windowMs;
-    if (!buckets.has(key)) {
-      buckets.set(key, { errors: 0, warnings: 0, info: 0, other: 0 });
-    }
-    const b = buckets.get(key)!;
-    if (level === 'error' || level === 'fatal' || level === 'critical') b.errors++;
-    else if (level === 'warn' || level === 'warning') b.warnings++;
-    else if (level === 'info') b.info++;
-    else b.other++;
-  });
+  async function buildBuckets(
+    bucketMs: number,
+    timeFilter?: { start: number; end: number },
+  ): Promise<{ buckets: Map<number, Bucket>; skipped: number; stats: StreamStats }> {
+    const buckets = new Map<number, Bucket>();
+    let skipped = 0;
+    const stats = await streamLinesResilient(logFile, pattern, (entry) => {
+      const level = String(entry[levelField] ?? '').toLowerCase();
+      const ts = parseTimestamp(entry[timestampField]);
+      if (ts === null) {
+        skipped++;
+        return;
+      }
+      if (timeFilter && (ts < timeFilter.start || ts >= timeFilter.end)) return;
+      const key = Math.floor(ts / bucketMs) * bucketMs;
+      if (!buckets.has(key)) buckets.set(key, { errors: 0, warnings: 0, info: 0, other: 0 });
+      const b = buckets.get(key)!;
+      if (level === 'error' || level === 'fatal' || level === 'critical') b.errors++;
+      else if (level === 'warn' || level === 'warning') b.warnings++;
+      else if (level === 'info') b.info++;
+      else b.other++;
+    });
+    return { buckets, skipped, stats };
+  }
 
+  // Determine bucket size
+  let bucketMs = windowMinutes * 60 * 1000;
+  let granularityChosen: 'ms' | 's' | 'min' = 'min';
+  let densityEventsPerSec = 0;
+
+  if (adaptive) {
+    const sampleTs: number[] = [];
+    await streamLinesResilient(logFile, pattern, (entry) => {
+      if (sampleTs.length >= 1000) return;
+      const ts = parseTimestamp(entry[timestampField]);
+      if (ts !== null) sampleTs.push(ts);
+    });
+
+    if (sampleTs.length >= 2) {
+      sampleTs.sort((a, b) => a - b);
+      const range = sampleTs[sampleTs.length - 1] - sampleTs[0];
+      const meanIat = range / (sampleTs.length - 1);
+      densityEventsPerSec = meanIat > 0 ? Math.round(1000 / meanIat) : 0;
+      if (meanIat < 10) {
+        granularityChosen = 'ms';
+        bucketMs = 100;
+      } else if (meanIat < 1000) {
+        granularityChosen = 's';
+        bucketMs = 1000;
+      }
+    }
+  }
+
+  const { buckets, skipped, stats } = await buildBuckets(bucketMs);
   const sortedKeys = Array.from(buckets.keys()).sort((a, b) => a - b);
 
   const errorCounts = Array.from(buckets.values()).map((b) => b.errors);
@@ -272,11 +306,17 @@ export async function summarizeLogTimeline(
   const errorStdDev = Math.sqrt(errorVariance);
   const spikeThreshold = meanErrors + errorStdDev;
 
+  const windowLabel = adaptive
+    ? `${bucketMs}ms (auto: ${granularityChosen})`
+    : `${windowMinutes}min`;
+
   const lines = [
     `Log Timeline Summary`,
     `  File:        ${logFile}`,
     `  Lines read:  ${stats.totalLines}`,
-    `  Window:      ${windowMinutes}min`,
+    `  Window:      ${windowLabel}`,
+    adaptive ? `  Granularity: ${granularityChosen}` : '',
+    adaptive && densityEventsPerSec > 0 ? `  Density:     ${densityEventsPerSec} events/sec` : '',
     skipped > 0 ? `  Skipped:     ${skipped} (no timestamp)` : '',
     ...formatParseStats(stats),
     `  Buckets:     ${buckets.size}`,
@@ -292,6 +332,36 @@ export async function summarizeLogTimeline(
     lines.push(
       `${errorMark} ${time.padEnd(24)} ${String(b.errors).padStart(6)}  ${String(b.warnings).padStart(8)}  ${String(b.info).padStart(4)}  ${String(b.other).padStart(5)}`,
     );
+  }
+
+  // Zoom pass: re-scan peak error bucket at 10x finer resolution
+  if (adaptive && sortedKeys.length > 0) {
+    const peakKey = sortedKeys.reduce(
+      (pk, k) => (buckets.get(k)!.errors > buckets.get(pk)!.errors ? k : pk),
+      sortedKeys[0],
+    );
+    if (buckets.get(peakKey)!.errors > 0) {
+      const zoomBucketMs = Math.max(1, Math.floor(bucketMs / 10));
+      const { buckets: zoomBuckets } = await buildBuckets(zoomBucketMs, {
+        start: peakKey,
+        end: peakKey + bucketMs,
+      });
+      const zoomKeys = Array.from(zoomBuckets.keys()).sort((a, b) => a - b);
+      if (zoomKeys.length > 0) {
+        lines.push('');
+        lines.push(
+          `  Zoomed burst (${new Date(peakKey).toISOString()} window, ${zoomBucketMs}ms buckets):`,
+        );
+        lines.push(`  ${'─'.repeat(57)}`);
+        for (const key of zoomKeys) {
+          const b = zoomBuckets.get(key)!;
+          const time = new Date(key).toISOString().replace('T', ' ').replace('.000Z', 'Z');
+          lines.push(
+            `   ${time.padEnd(24)} ${String(b.errors).padStart(6)}  ${String(b.warnings).padStart(8)}  ${String(b.info).padStart(4)}  ${String(b.other).padStart(5)}`,
+          );
+        }
+      }
+    }
   }
 
   return lines.join('\n');

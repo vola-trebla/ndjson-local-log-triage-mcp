@@ -355,3 +355,73 @@ describe('correlateRequest', () => {
     expect(result).toContain('Events found:      2');
   });
 });
+
+describe('summarizeLogTimeline adaptive granularity', () => {
+  let highDensityFile: string;
+
+  beforeAll(() => {
+    // 500 events in 1 second at ~2ms intervals → high density → should pick 'ms' or 's'
+    highDensityFile = path.join(logDir, 'high-density.ndjson');
+    const base = new Date('2025-01-15T03:00:00.000Z').getTime();
+    const lines: string[] = [];
+    for (let i = 0; i < 500; i++) {
+      lines.push(
+        JSON.stringify({
+          timestamp: new Date(base + i * 2).toISOString(),
+          level: i % 50 === 0 ? 'error' : 'info',
+          msg: 'event',
+        }),
+      );
+    }
+    fs.writeFileSync(highDensityFile, lines.join('\n') + '\n');
+  });
+
+  it('adaptive: false preserves original behavior (no Granularity line)', async () => {
+    const result = await summarizeLogTimeline(logFile, 'timestamp', 'level', 5, undefined, false);
+    expect(result).not.toContain('Granularity:');
+    expect(result).toContain('Window:      5min');
+  });
+
+  it('adaptive: true on high-density data picks ms or s granularity', async () => {
+    const result = await summarizeLogTimeline(
+      highDensityFile,
+      'timestamp',
+      'level',
+      5,
+      undefined,
+      true,
+    );
+    expect(result).toContain('Granularity:');
+    const hasMsOrS = result.includes('Granularity: ms') || result.includes('Granularity: s');
+    expect(hasMsOrS).toBe(true);
+  });
+
+  it('adaptive: true on high-density data emits Density in events/sec', async () => {
+    const result = await summarizeLogTimeline(
+      highDensityFile,
+      'timestamp',
+      'level',
+      5,
+      undefined,
+      true,
+    );
+    expect(result).toContain('Density:');
+  });
+
+  it('adaptive: true on normal-density data picks min granularity', async () => {
+    const result = await summarizeLogTimeline(logFile, 'timestamp', 'level', 5, undefined, true);
+    expect(result).toContain('Granularity: min');
+  });
+
+  it('adaptive: true with errors emits Zoomed burst section', async () => {
+    const result = await summarizeLogTimeline(
+      highDensityFile,
+      'timestamp',
+      'level',
+      5,
+      undefined,
+      true,
+    );
+    expect(result).toContain('Zoomed burst');
+  });
+});

@@ -22,7 +22,7 @@ A service crashes at 3am. The log file is `app.log.ndjson` and it's 2GB. You ask
 
 ### `query_log_pattern`
 
-Filter log entries by a field/value match. Returns up to N matching entries, streaming the file without loading it entirely.
+Filter log entries by a field/value match. Returns up to N matching entries, streaming the file without loading it entirely. Pass `lineStartPattern` (e.g. `"^{"`) to reconstruct multiline stack traces silently dropped by the default parser.
 
 ```
 Log Query Results
@@ -55,6 +55,8 @@ Error Anomaly Detection
 
 Chronological aggregation of errors, warnings, and info counts per time window. Quick visual of where the incident is.
 
+Pass `adaptive: true` to auto-scale bucket size to actual event density and zoom in on the peak error window at 10× finer resolution.
+
 ```
 Log Timeline Summary
   File:        /var/log/app.log.ndjson
@@ -68,6 +70,24 @@ Log Timeline Summary
     2025-01-15 03:10:00Z          3         9   141      0
   ! 2025-01-15 03:15:00Z         23        14   119      0
     2025-01-15 03:20:00Z          9        11   133      0
+```
+
+### `correlate_request`
+
+Reconstructs a distributed trace from multiple NDJSON log files. Given a `trace_id`, collects all correlated events in chronological order across all files and surfaces the services involved and total duration.
+
+```
+Request Correlation
+  Trace ID:          trace-8f7a9b2c
+  Files scanned:     2
+  Events found:      10
+  Services involved: api, worker
+  Duration:          890ms
+
+[2025-01-15T14:00:00.001Z] api           {"level":"info","msg":"incoming request",...}
+[2025-01-15T14:00:00.045Z] api           {"level":"info","msg":"auth token validated",...}
+[2025-01-15T14:00:00.112Z] worker        {"level":"info","msg":"job queued",...}
+...
 ```
 
 ---

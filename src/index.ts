@@ -16,10 +16,16 @@ server.tool(
     field: z.string().describe("JSON field name to filter on (e.g. 'level', 'service')"),
     value: z.string().describe('Value to match (case-insensitive substring)'),
     limit: z.number().int().min(1).max(1000).default(50).describe('Max entries to return'),
+    lineStartPattern: z
+      .string()
+      .optional()
+      .describe(
+        'Regex that marks new log line start (e.g. "^{") — enables multiline stack trace reconstruction',
+      ),
   },
-  async ({ logFile, field, value, limit }) => {
+  async ({ logFile, field, value, limit, lineStartPattern }) => {
     const text = await import('./triage.js').then((m) =>
-      m.queryLogPattern(logFile, field, value, limit),
+      m.queryLogPattern(logFile, field, value, limit, lineStartPattern),
     );
     return { content: [{ type: 'text', text }] };
   },
@@ -46,8 +52,20 @@ server.tool(
       .number()
       .default(2.0)
       .describe('Z-score threshold above which a window is flagged as anomalous'),
+    lineStartPattern: z
+      .string()
+      .optional()
+      .describe('Regex that marks new log line start — enables multiline stack trace buffering'),
   },
-  async ({ logFile, timestampField, levelField, errorValues, windowMinutes, zScoreThreshold }) => {
+  async ({
+    logFile,
+    timestampField,
+    levelField,
+    errorValues,
+    windowMinutes,
+    zScoreThreshold,
+    lineStartPattern,
+  }) => {
     const text = await import('./triage.js').then((m) =>
       m.detectErrorAnomalies(
         logFile,
@@ -56,6 +74,7 @@ server.tool(
         errorValues,
         windowMinutes,
         zScoreThreshold,
+        lineStartPattern,
       ),
     );
     return { content: [{ type: 'text', text }] };
@@ -75,10 +94,14 @@ server.tool(
       .min(1)
       .default(5)
       .describe('Aggregation window size in minutes'),
+    lineStartPattern: z
+      .string()
+      .optional()
+      .describe('Regex that marks new log line start — enables multiline stack trace buffering'),
   },
-  async ({ logFile, timestampField, levelField, windowMinutes }) => {
+  async ({ logFile, timestampField, levelField, windowMinutes, lineStartPattern }) => {
     const text = await import('./triage.js').then((m) =>
-      m.summarizeLogTimeline(logFile, timestampField, levelField, windowMinutes),
+      m.summarizeLogTimeline(logFile, timestampField, levelField, windowMinutes, lineStartPattern),
     );
     return { content: [{ type: 'text', text }] };
   },

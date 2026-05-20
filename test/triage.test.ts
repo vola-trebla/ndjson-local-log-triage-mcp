@@ -6,6 +6,7 @@ import { queryLogPattern, detectErrorAnomalies, summarizeLogTimeline } from '../
 
 let logDir: string;
 let logFile: string;
+let multilineFile: string;
 
 function makeEntry(level: string, timestamp: string, extra: Record<string, unknown> = {}): string {
   return JSON.stringify({ timestamp, level, msg: 'test entry', ...extra });
@@ -47,6 +48,20 @@ beforeAll(() => {
   ];
 
   fs.writeFileSync(logFile, lines.join('\n') + '\n');
+
+  multilineFile = path.join(logDir, 'multiline.ndjson');
+  fs.writeFileSync(
+    multilineFile,
+    [
+      JSON.stringify({ timestamp: '2025-01-15T03:00:00Z', level: 'error', msg: 'DB failed' }),
+      'java.lang.RuntimeException: Connection refused',
+      '  at com.example.DbPool.connect(DbPool.java:42)',
+      '  at com.example.App.main(App.java:15)',
+      JSON.stringify({ timestamp: '2025-01-15T03:01:00Z', level: 'info', msg: 'Reconnecting' }),
+      JSON.stringify({ timestamp: '2025-01-15T03:02:00Z', level: 'error', msg: 'Failed again' }),
+      'Caused by: timeout after 30s',
+    ].join('\n') + '\n',
+  );
 });
 
 afterAll(() => {
@@ -178,5 +193,31 @@ describe('summarizeLogTimeline', () => {
       5,
     );
     expect(result).toContain('Error: file not found');
+  });
+});
+
+describe('resilient multiline parsing', () => {
+  it('without lineStartPattern: counts stack trace lines as malformed, emits parse_error_rate', async () => {
+    const result = await queryLogPattern(multilineFile, 'level', 'error', 50);
+    expect(result).toContain('Parse error rate:');
+  });
+
+  it('with lineStartPattern: reconstructs stack traces and emits reconstructed_events', async () => {
+    const result = await queryLogPattern(multilineFile, 'level', 'error', 50, '^{');
+    expect(result).toContain('Reconstructed events:');
+    const entryLines = result.split('\n').filter((l) => l.startsWith('{'));
+    const withStackTrace = entryLines.filter((l) => l.includes('stack_trace'));
+    expect(withStackTrace.length).toBeGreaterThan(0);
+  });
+
+  it('with lineStartPattern: no parse_error_rate when all lines are accounted for', async () => {
+    const result = await queryLogPattern(multilineFile, 'level', 'error', 50, '^{');
+    expect(result).not.toContain('Parse error rate:');
+  });
+
+  it('with lineStartPattern: summarizeLogTimeline still counts reconstructed events correctly', async () => {
+    const result = await summarizeLogTimeline(multilineFile, 'timestamp', 'level', 5, '^{');
+    expect(result).toContain('Reconstructed events:');
+    expect(result).toContain('2025-01-15');
   });
 });

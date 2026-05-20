@@ -1,32 +1,122 @@
 import * as fs from 'fs';
 import * as readline from 'readline';
 
+interface StreamStats {
+  totalLines: number;
+  malformedLines: number;
+  reconstructedEvents: number;
+  droppedBytes: number;
+}
+
+async function streamLinesResilient(
+  filePath: string,
+  lineStartPattern: RegExp | undefined,
+  onEntry: (entry: Record<string, unknown>) => void,
+): Promise<StreamStats> {
+  const stats: StreamStats = {
+    totalLines: 0,
+    malformedLines: 0,
+    reconstructedEvents: 0,
+    droppedBytes: 0,
+  };
+  let pendingEntry: Record<string, unknown> | null = null;
+  const pendingContinuations: string[] = [];
+
+  function flushPending() {
+    if (pendingEntry === null) return;
+    if (pendingContinuations.length > 0) {
+      pendingEntry['stack_trace'] = pendingContinuations.join('\n');
+      stats.reconstructedEvents++;
+      pendingContinuations.length = 0;
+    }
+    onEntry(pendingEntry);
+    pendingEntry = null;
+  }
+
+  await new Promise<void>((resolve, reject) => {
+    const rl = readline.createInterface({
+      input: fs.createReadStream(filePath),
+      crlfDelay: Infinity,
+    });
+    rl.on('line', (rawLine) => {
+      const line = rawLine.trim();
+      if (!line) return;
+      stats.totalLines++;
+
+      let parsed: Record<string, unknown> | null = null;
+      try {
+        parsed = JSON.parse(line) as Record<string, unknown>;
+      } catch {
+        parsed = null;
+      }
+
+      if (parsed !== null) {
+        flushPending();
+        pendingEntry = parsed;
+      } else if (lineStartPattern !== undefined) {
+        if (lineStartPattern.test(line)) {
+          // Matches start pattern but invalid JSON — genuinely malformed event start
+          flushPending();
+          stats.malformedLines++;
+        } else {
+          // Continuation line (stack trace, log continuation)
+          if (pendingEntry !== null) {
+            pendingContinuations.push(line);
+          } else {
+            stats.droppedBytes += line.length;
+            stats.malformedLines++;
+          }
+        }
+      } else {
+        stats.malformedLines++;
+      }
+    });
+    rl.on('close', () => {
+      flushPending();
+      resolve();
+    });
+    rl.on('error', reject);
+  });
+
+  return stats;
+}
+
+function formatParseStats(stats: StreamStats): string[] {
+  const lines: string[] = [];
+  if (stats.malformedLines > 0) {
+    const rate =
+      stats.totalLines > 0 ? ((stats.malformedLines / stats.totalLines) * 100).toFixed(1) : '0.0';
+    lines.push(`  Parse error rate: ${rate}% (${stats.malformedLines} malformed lines)`);
+  }
+  if (stats.reconstructedEvents > 0) {
+    lines.push(`  Reconstructed events: ${stats.reconstructedEvents}`);
+  }
+  if (stats.droppedBytes > 0) {
+    lines.push(`  Dropped bytes: ${stats.droppedBytes}`);
+  }
+  return lines;
+}
+
 export async function queryLogPattern(
   logFile: string,
   field: string,
   value: string,
   limit: number,
+  lineStartPattern?: string,
 ): Promise<string> {
   if (!fs.existsSync(logFile)) {
     return `Error: file not found: ${logFile}`;
   }
 
+  const pattern = lineStartPattern ? new RegExp(lineStartPattern) : undefined;
   const needle = value.toLowerCase();
-  const matches: object[] = [];
-  let totalLines = 0;
-  let parseErrors = 0;
+  const matches: Record<string, unknown>[] = [];
 
-  await streamLines(logFile, (line) => {
-    totalLines++;
+  const stats = await streamLinesResilient(logFile, pattern, (entry) => {
     if (matches.length >= limit) return;
-    try {
-      const entry = JSON.parse(line) as Record<string, unknown>;
-      const fieldValue = String(entry[field] ?? '').toLowerCase();
-      if (fieldValue.includes(needle)) {
-        matches.push(entry);
-      }
-    } catch {
-      parseErrors++;
+    const fieldValue = String(entry[field] ?? '').toLowerCase();
+    if (fieldValue.includes(needle)) {
+      matches.push(entry);
     }
   });
 
@@ -34,10 +124,9 @@ export async function queryLogPattern(
     `Log Query Results`,
     `  File:        ${logFile}`,
     `  Filter:      ${field} contains "${value}"`,
-    `  Lines read:  ${totalLines}`,
+    `  Lines read:  ${stats.totalLines}`,
     `  Matches:     ${matches.length}${matches.length >= limit ? ` (limit ${limit} reached)` : ''}`,
-    parseErrors > 0 ? `  Parse errors: ${parseErrors}` : '',
-    '',
+    ...formatParseStats(stats),
   ].filter((l) => l !== '');
 
   if (matches.length === 0) {
@@ -59,40 +148,36 @@ export async function detectErrorAnomalies(
   errorValues: string[],
   windowMinutes: number,
   zScoreThreshold: number,
+  lineStartPattern?: string,
 ): Promise<string> {
   if (!fs.existsSync(logFile)) {
     return `Error: file not found: ${logFile}`;
   }
 
+  const pattern = lineStartPattern ? new RegExp(lineStartPattern) : undefined;
   const errorSet = new Set(errorValues.map((v) => v.toLowerCase()));
   const windowMs = windowMinutes * 60 * 1000;
   const buckets = new Map<number, number>();
-  let totalLines = 0;
   let skipped = 0;
 
-  await streamLines(logFile, (line) => {
-    totalLines++;
-    try {
-      const entry = JSON.parse(line) as Record<string, unknown>;
-      const level = String(entry[levelField] ?? '').toLowerCase();
-      if (!errorSet.has(level)) return;
-      const ts = parseTimestamp(entry[timestampField]);
-      if (ts === null) {
-        skipped++;
-        return;
-      }
-      const bucket = Math.floor(ts / windowMs) * windowMs;
-      buckets.set(bucket, (buckets.get(bucket) ?? 0) + 1);
-    } catch {
+  const stats = await streamLinesResilient(logFile, pattern, (entry) => {
+    const level = String(entry[levelField] ?? '').toLowerCase();
+    if (!errorSet.has(level)) return;
+    const ts = parseTimestamp(entry[timestampField]);
+    if (ts === null) {
       skipped++;
+      return;
     }
+    const bucket = Math.floor(ts / windowMs) * windowMs;
+    buckets.set(bucket, (buckets.get(bucket) ?? 0) + 1);
   });
 
   if (buckets.size === 0) {
     return [
       `Error Anomaly Detection`,
       `  File:       ${logFile}`,
-      `  Lines read: ${totalLines}`,
+      `  Lines read: ${stats.totalLines}`,
+      ...formatParseStats(stats),
       ``,
       `  No error entries with parseable timestamps found.`,
     ].join('\n');
@@ -116,14 +201,15 @@ export async function detectErrorAnomalies(
   const lines = [
     `Error Anomaly Detection`,
     `  File:            ${logFile}`,
-    `  Lines read:      ${totalLines}`,
-    skipped > 0 ? `  Skipped:         ${skipped} (no timestamp / parse error)` : '',
+    `  Lines read:      ${stats.totalLines}`,
+    skipped > 0 ? `  Skipped:         ${skipped} (no timestamp)` : '',
+    ...formatParseStats(stats),
     `  Window:          ${windowMinutes}min`,
     `  Z-score cutoff:  ${zScoreThreshold}`,
     `  Baseline:        mean=${mean.toFixed(1)} errors/window, stdDev=${stdDev.toFixed(1)}`,
     `  Anomalies found: ${anomalies.length}`,
     ``,
-  ];
+  ].filter((l) => l !== '');
 
   if (anomalies.length === 0) {
     lines.push(`  No anomalous windows detected.`);
@@ -142,40 +228,35 @@ export async function summarizeLogTimeline(
   timestampField: string,
   levelField: string,
   windowMinutes: number,
+  lineStartPattern?: string,
 ): Promise<string> {
   if (!fs.existsSync(logFile)) {
     return `Error: file not found: ${logFile}`;
   }
 
+  const pattern = lineStartPattern ? new RegExp(lineStartPattern) : undefined;
   const windowMs = windowMinutes * 60 * 1000;
 
   type Bucket = { errors: number; warnings: number; info: number; other: number };
   const buckets = new Map<number, Bucket>();
-  let totalLines = 0;
   let skipped = 0;
 
-  await streamLines(logFile, (line) => {
-    totalLines++;
-    try {
-      const entry = JSON.parse(line) as Record<string, unknown>;
-      const level = String(entry[levelField] ?? '').toLowerCase();
-      const ts = parseTimestamp(entry[timestampField]);
-      if (ts === null) {
-        skipped++;
-        return;
-      }
-      const key = Math.floor(ts / windowMs) * windowMs;
-      if (!buckets.has(key)) {
-        buckets.set(key, { errors: 0, warnings: 0, info: 0, other: 0 });
-      }
-      const b = buckets.get(key)!;
-      if (level === 'error' || level === 'fatal' || level === 'critical') b.errors++;
-      else if (level === 'warn' || level === 'warning') b.warnings++;
-      else if (level === 'info') b.info++;
-      else b.other++;
-    } catch {
+  const stats = await streamLinesResilient(logFile, pattern, (entry) => {
+    const level = String(entry[levelField] ?? '').toLowerCase();
+    const ts = parseTimestamp(entry[timestampField]);
+    if (ts === null) {
       skipped++;
+      return;
     }
+    const key = Math.floor(ts / windowMs) * windowMs;
+    if (!buckets.has(key)) {
+      buckets.set(key, { errors: 0, warnings: 0, info: 0, other: 0 });
+    }
+    const b = buckets.get(key)!;
+    if (level === 'error' || level === 'fatal' || level === 'critical') b.errors++;
+    else if (level === 'warn' || level === 'warning') b.warnings++;
+    else if (level === 'info') b.info++;
+    else b.other++;
   });
 
   const sortedKeys = Array.from(buckets.keys()).sort((a, b) => a - b);
@@ -193,9 +274,10 @@ export async function summarizeLogTimeline(
   const lines = [
     `Log Timeline Summary`,
     `  File:        ${logFile}`,
-    `  Lines read:  ${totalLines}`,
+    `  Lines read:  ${stats.totalLines}`,
     `  Window:      ${windowMinutes}min`,
-    skipped > 0 ? `  Skipped:     ${skipped} (no timestamp / parse error)` : '',
+    skipped > 0 ? `  Skipped:     ${skipped} (no timestamp)` : '',
+    ...formatParseStats(stats),
     `  Buckets:     ${buckets.size}`,
     ``,
     `  Time (UTC)                 Errors  Warnings  Info  Other`,
@@ -212,21 +294,6 @@ export async function summarizeLogTimeline(
   }
 
   return lines.join('\n');
-}
-
-async function streamLines(filePath: string, onLine: (line: string) => void): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const rl = readline.createInterface({
-      input: fs.createReadStream(filePath),
-      crlfDelay: Infinity,
-    });
-    rl.on('line', (line) => {
-      const trimmed = line.trim();
-      if (trimmed) onLine(trimmed);
-    });
-    rl.on('close', resolve);
-    rl.on('error', reject);
-  });
 }
 
 function parseTimestamp(value: unknown): number | null {

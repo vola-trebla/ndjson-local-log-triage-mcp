@@ -107,5 +107,34 @@ server.tool(
   },
 );
 
+server.tool(
+  'correlate_request',
+  'Reconstruct a distributed trace by collecting all log events matching a trace/request ID across multiple NDJSON files, sorted chronologically.',
+  {
+    logFiles: z.array(z.string()).min(1).describe('Array of absolute paths to NDJSON log files'),
+    traceId: z.string().describe('Trace/request ID value to search for'),
+    idField: z.string().default('trace_id').describe('Field name containing the trace/request ID'),
+    serviceField: z.string().default('service').describe('Field name for service/component name'),
+    timestampField: z.string().default('timestamp').describe('Field name for ISO timestamp'),
+    lineStartPattern: z
+      .string()
+      .optional()
+      .describe('Regex that marks new log line start — enables multiline stack trace buffering'),
+  },
+  async ({ logFiles, traceId, idField, serviceField, timestampField, lineStartPattern }) => {
+    const text = await import('./triage.js').then((m) =>
+      m.correlateRequest({
+        logFiles,
+        traceId,
+        idField,
+        serviceField,
+        timestampField,
+        lineStartPattern,
+      }),
+    );
+    return { content: [{ type: 'text', text }] };
+  },
+);
+
 const transport = new StdioServerTransport();
 await server.connect(transport);

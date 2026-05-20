@@ -98,10 +98,23 @@ server.tool(
       .string()
       .optional()
       .describe('Regex that marks new log line start — enables multiline stack trace buffering'),
+    adaptive: z
+      .boolean()
+      .default(false)
+      .describe(
+        'Auto-scale bucket size to actual event density — samples first 1000 events to choose ms/s/min granularity and zooms in on the peak error window',
+      ),
   },
-  async ({ logFile, timestampField, levelField, windowMinutes, lineStartPattern }) => {
+  async ({ logFile, timestampField, levelField, windowMinutes, lineStartPattern, adaptive }) => {
     const text = await import('./triage.js').then((m) =>
-      m.summarizeLogTimeline(logFile, timestampField, levelField, windowMinutes, lineStartPattern),
+      m.summarizeLogTimeline(
+        logFile,
+        timestampField,
+        levelField,
+        windowMinutes,
+        lineStartPattern,
+        adaptive,
+      ),
     );
     return { content: [{ type: 'text', text }] };
   },

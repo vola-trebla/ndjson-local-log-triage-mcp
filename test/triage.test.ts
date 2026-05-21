@@ -1,12 +1,18 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import {
   queryLogPattern,
   detectErrorAnomalies,
   summarizeLogTimeline,
   correlateRequest,
+  discoverLogSchema,
+  groupSemanticPatterns,
+  startLiveTriage,
+  queryExternalLogs,
+  activeTriages,
+  testNotifications,
 } from '../src/triage.js';
 
 let logDir: string;
@@ -423,5 +429,229 @@ describe('summarizeLogTimeline adaptive granularity', () => {
       true,
     );
     expect(result).toContain('Zoomed burst');
+  });
+});
+
+describe('discoverLogSchema', () => {
+  it('detects NDJSON schema and flags standard fields', async () => {
+    const resultJson = await discoverLogSchema(logFile, 50);
+    const result = JSON.parse(resultJson);
+
+    expect(result.fileFormat).toBe('NDJSON');
+    expect(result.detectedKeys.timestamp).toBeDefined();
+    expect(result.detectedKeys.timestamp.isChronologicalIndex).toBe(true);
+    expect(result.detectedKeys.level.isSeverityField).toBe(true);
+    expect(result.detectedKeys.level.possibleValues).toContain('info');
+    expect(result.detectedKeys.level.possibleValues).toContain('error');
+  });
+
+  it('detects Kubernetes container log wrapper format', async () => {
+    const k8sLogFile = path.join(logDir, 'k8s.log');
+    fs.writeFileSync(
+      k8sLogFile,
+      [
+        JSON.stringify({ time: '2025-01-15T03:15:00Z', stream: 'stdout', log: 'app started' }),
+        JSON.stringify({ time: '2025-01-15T03:15:01Z', stream: 'stderr', log: 'some warning' }),
+      ].join('\n'),
+    );
+
+    const resultJson = await discoverLogSchema(k8sLogFile, 10);
+    const result = JSON.parse(resultJson);
+
+    expect(result.fileFormat).toBe('Kubernetes');
+    expect(result.detectedKeys.log).toBeDefined();
+    expect(result.detectedKeys.stream.type).toBe('string');
+  });
+
+  it('detects Syslog format based on RFC pattern', async () => {
+    const syslogFile = path.join(logDir, 'syslog.log');
+    fs.writeFileSync(
+      syslogFile,
+      [
+        '<13>1 2025-01-15T03:15:00Z myhost myapp 1234 - - app started',
+        'Jan 15 03:15:00 myhost myapp[1234]: another event',
+      ].join('\n'),
+    );
+
+    const resultJson = await discoverLogSchema(syslogFile, 10);
+    const result = JSON.parse(resultJson);
+
+    expect(result.fileFormat).toBe('Syslog');
+    expect(result.detectedKeys.level).toBeDefined();
+  });
+
+  it('handles missing file gracefully', async () => {
+    const resultJson = await discoverLogSchema('/tmp/does-not-exist-xxx.log');
+    const result = JSON.parse(resultJson);
+    expect(result.error).toContain('File not found');
+  });
+});
+
+describe('groupSemanticPatterns', () => {
+  it('groups similar logs and extracts wildcard parameters', async () => {
+    const patternFile = path.join(logDir, 'patterns.ndjson');
+    fs.writeFileSync(
+      patternFile,
+      [
+        JSON.stringify({
+          timestamp: '2025-01-15T03:00:00Z',
+          msg: 'connection failed from 192.168.1.1 port 5000',
+        }),
+        JSON.stringify({
+          timestamp: '2025-01-15T03:00:01Z',
+          msg: 'connection failed from 10.0.0.2 port 80',
+        }),
+        JSON.stringify({
+          timestamp: '2025-01-15T03:00:02Z',
+          msg: 'connection failed from 172.16.0.1 port 8080',
+        }),
+        JSON.stringify({ timestamp: '2025-01-15T03:00:03Z', msg: 'user 1 logged in successfully' }),
+        JSON.stringify({ timestamp: '2025-01-15T03:00:04Z', msg: 'user 2 logged in successfully' }),
+      ].join('\n') + '\n',
+    );
+
+    const resultJson = await groupSemanticPatterns(patternFile, 0.5, 4);
+    const result = JSON.parse(resultJson);
+
+    expect(result.totalProcessedLogs).toBe(5);
+    expect(result.uniquePatternsCount).toBe(2);
+
+    const connectionPattern = result.patterns.find((p: any) =>
+      p.template.includes('connection failed'),
+    );
+    expect(connectionPattern).toBeDefined();
+    expect(connectionPattern.occurrences).toBe(3);
+
+    const loginPattern = result.patterns.find((p: any) => p.template.includes('logged in'));
+    expect(loginPattern).toBeDefined();
+    expect(loginPattern.occurrences).toBe(2);
+  });
+
+  it('respects timeWindowStart filter', async () => {
+    const patternFile = path.join(logDir, 'patterns.ndjson');
+    const resultJson = await groupSemanticPatterns(patternFile, 0.5, 4, '2025-01-15T03:00:03Z');
+    const result = JSON.parse(resultJson);
+    expect(result.totalProcessedLogs).toBe(2); // Only the last 2 entries
+  });
+
+  it('handles missing file gracefully', async () => {
+    const resultJson = await groupSemanticPatterns('/tmp/does-not-exist-xxx.log');
+    const result = JSON.parse(resultJson);
+    expect(result.error).toContain('File not found');
+  });
+});
+
+describe('queryExternalLogs', () => {
+  it('translates query and returns OTel-mapped records for Datadog', async () => {
+    const resultJson = await queryExternalLogs(
+      'datadog',
+      'service:auth status:error "login failed"',
+      '2025-01-15T03:00:00Z',
+      2,
+    );
+    const result = JSON.parse(resultJson);
+
+    expect(result.provider).toBe('datadog');
+    expect(result.translatedQuery).toBe('service:auth status:error "login failed"');
+    expect(result.records.length).toBe(2);
+    expect(result.records[0].severityText).toBe('ERROR');
+    expect(result.records[0].severityNumber).toBe(17);
+    expect(result.records[0].body).toContain('login failed');
+    expect(result.records[0].attributes.service).toBe('auth');
+    expect(result.records[0].timeUnixNano).toBeDefined();
+  });
+
+  it('translates query for Splunk', async () => {
+    const resultJson = await queryExternalLogs(
+      'splunk',
+      'service:auth status:error "login failed"',
+      '2025-01-15T03:00:00Z',
+      1,
+    );
+    const result = JSON.parse(resultJson);
+    expect(result.translatedQuery).toBe('service="auth" AND status="error" AND "login failed"');
+  });
+
+  it('translates query for Elasticsearch', async () => {
+    const resultJson = await queryExternalLogs(
+      'elasticsearch',
+      'service:auth "login failed"',
+      '2025-01-15T03:00:00Z',
+      1,
+    );
+    const result = JSON.parse(resultJson);
+    const queryObj = JSON.parse(result.translatedQuery);
+    expect(queryObj.query.bool.must).toContainEqual({ term: { service: 'auth' } });
+    expect(queryObj.query.bool.must).toContainEqual({ match: { message: 'login failed' } });
+  });
+});
+
+describe('startLiveTriage', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    for (const [file, interval] of activeTriages) {
+      clearInterval(interval);
+    }
+    activeTriages.clear();
+    testNotifications.length = 0;
+  });
+
+  it('starts live triage and generates notifications on error spike', async () => {
+    const liveFile = path.join(logDir, 'live.log');
+    const nowMs = Date.now();
+    const initialLines = [];
+    for (let i = 0; i < 5; i++) {
+      const ts = new Date(nowMs - (10 - i) * 60 * 1000).toISOString();
+      initialLines.push(JSON.stringify({ timestamp: ts, level: 'error', msg: 'minor error' }));
+    }
+    fs.writeFileSync(liveFile, initialLines.join('\n') + '\n');
+
+    const res = await startLiveTriage(liveFile, 1.5, 500 * 1024 * 1024);
+    expect(res).toContain('started');
+
+    fs.appendFileSync(
+      liveFile,
+      JSON.stringify({ timestamp: new Date().toISOString(), level: 'error', msg: 'db error' }) +
+        '\n',
+    );
+    fs.appendFileSync(
+      liveFile,
+      JSON.stringify({ timestamp: new Date().toISOString(), level: 'error', msg: 'redis error' }) +
+        '\n',
+    );
+    fs.appendFileSync(
+      liveFile,
+      JSON.stringify({ timestamp: new Date().toISOString(), level: 'error', msg: 'auth error' }) +
+        '\n',
+    );
+
+    await vi.advanceTimersByTimeAsync(1000);
+
+    expect(testNotifications.length).toBeGreaterThan(0);
+    const alerts = testNotifications.filter((n) => n.params.type === 'anomaly');
+    expect(alerts.length).toBeGreaterThan(0);
+    expect(alerts[alerts.length - 1].params.error_count).toBe(3);
+  });
+
+  it('stops triage and alerts on memory safety bounds', async () => {
+    const liveFile = path.join(logDir, 'live.log');
+    fs.writeFileSync(
+      liveFile,
+      JSON.stringify({ timestamp: '2025-01-15T03:00:00Z', level: 'info', msg: 'start' }) + '\n',
+    );
+
+    const res = await startLiveTriage(liveFile, 2.0, 1);
+    expect(res).toContain('started');
+
+    await vi.advanceTimersByTimeAsync(1000);
+
+    const alert = testNotifications.find((n) => n.params.type === 'memory_alert');
+    expect(alert).toBeDefined();
+    expect(alert.params.message).toContain('Heap memory usage');
+    expect(activeTriages.has(liveFile)).toBe(false);
   });
 });

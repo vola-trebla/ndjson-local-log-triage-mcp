@@ -90,6 +90,54 @@ Request Correlation
 ...
 ```
 
+### `discover_log_schema`
+
+Analyze a log file to infer its wrapper format (NDJSON, Syslog, Kubernetes container logs) and extract type schemas, identifying polymorphic keys, timestamp patterns, and severity fields.
+
+```json
+{
+  "fileFormat": "NDJSON",
+  "detectedKeys": {
+    "timestamp": { "type": "string", "format": "date-time", "isChronologicalIndex": true },
+    "level": { "type": "string", "isSeverityField": true, "possibleValues": ["info", "error"] }
+  }
+}
+```
+
+### `group_semantic_patterns`
+
+Cluster log messages dynamically using the fixed-depth tree-based **Drain parsing algorithm** to isolate distinct log templates and analyze their parameter distributions (wildcard variations).
+
+```
+Processed Logs: 1500
+Unique Patterns: 2
+
+- Template: "connection failed from * port *"
+  Occurrences: 1200
+  Parameters:
+    - param_0 (client_ip): 192.168.1.1 (80%), 10.0.0.5 (20%)
+```
+
+### `start_live_triage`
+
+Start background log tailing with real-time Z-score anomaly alerting on error frequency spikes and heap memory protection limits. Dispatches notifications directly over standard JSON-RPC channels.
+
+```json
+{
+  "method": "notifications/triage",
+  "params": {
+    "type": "anomaly",
+    "message": "Live Anomaly Detected: 45 errors in current window (Z-score: 3.52)",
+    "z_score": 3.52,
+    "error_count": 45
+  }
+}
+```
+
+### `query_external_logs`
+
+A unified gateway to query central log providers (Datadog, Splunk, Elasticsearch), converting search patterns to vendor-specific dialects and mapping the output into the standardized **OpenTelemetry Log Data Model** structure.
+
 ---
 
 ## ⚡ Setup
